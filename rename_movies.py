@@ -1,5 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Скрипт переименования фильмов по NFO файлам для Emby (GiviMedia)
+=================================================================
+
+Логика именования:
+  - Российский фильм (country содержит Россию/СССР, или title==originaltitle): "Название год"
+  - Зарубежный: "OriginalTitle (Title) год"
+  - При неоднозначности — спрашивает
+  - Конфликт имён → добавляет (1), (2)...
+
+Что переименовывается:
+  - Папка фильма
+  - Видеофайл внутри папки
+  - NFO файл (+ обновляет lockedfields внутри)
+  - Субтитры (.srt, .ass и т.д.) с тем же базовым именем
+  - Для фильмов без папки — создаётся папка, файлы переносятся
+
+Что НЕ переименовывается (только перемещается в папку):
+  - poster.jpg, fanart*.jpg, landscape.jpg, clearlogo.png и т.д.
+
+Запуск:
+  python rename_movies.py D:\\Media\\Movies            # preview
+  python rename_movies.py D:\\Media\\Movies --apply    # применить
+"""
+
 import os
 import sys
 import re
@@ -76,21 +101,26 @@ def is_russian(info: dict):
     """
     True  — точно российский
     False — точно зарубежный
-    None  — неоднозначно (спросим)
+    None  — неоднозначно (спросим): нет страны, названия совпадают
     """
     title = info['title'].lower()
     orig  = info['originaltitle'].lower()
 
+    # Явно российская страна → российский
     for c in info['countries']:
         if c in RUSSIAN_COUNTRIES:
             return True
 
-    if info['countries'] and orig and orig != title:
+    # Есть хоть какая-то страна (не российская) → зарубежный
+    if info['countries']:
         return False
 
-    if not orig or orig == title:
-        return None
+    # Нет страны совсем:
+    # Если originaltitle отличается от title → считаем зарубежным автоматически
+    if orig and orig != title:
+        return False
 
+    # Названия совпадают или originaltitle пустой → неоднозначно, спросим
     return None
 
 
@@ -284,9 +314,15 @@ def process(base_dir: Path, apply: bool):
     plan = []
     for movie in movies:
         new_base = build_name(movie['info'])
+
+        # Если папка уже названа правильно — пропускаем
+        if movie['type'] == 'in_folder' and movie['folder'].name == new_base:
+            plan.append({'movie': movie, 'new_base': new_base, 'skip': True})
+            continue
+
         new_base = unique_name(new_base, taken)
         taken.add(new_base)
-        plan.append({'movie': movie, 'new_base': new_base})
+        plan.append({'movie': movie, 'new_base': new_base, 'skip': False})
 
     # ── Preview ─────────────────────────────────────────────────────
     print("\n" + "═" * 65)
@@ -297,9 +333,7 @@ def process(base_dir: Path, apply: bool):
     unchanged = []
 
     for p in plan:
-        m  = p['movie']
-        nb = p['new_base']
-        if m['type'] == 'in_folder' and m['folder'].name == nb:
+        if p.get('skip'):
             unchanged.append(p)
         else:
             changed.append(p)
